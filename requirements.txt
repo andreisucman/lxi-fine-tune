@@ -10,3 +10,6 @@ bitsandbytes>=0.41.0
 huggingface-hub>=0.20.0
 scipy
 tqdm
+flash-attn>=2.5.0
+einops
+safetensors

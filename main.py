@@ -17,47 +17,62 @@ from trl import SFTTrainer
 # Configuration
 MODEL_ID = "google/gemma-3-4b-it"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-LORA_RANK = 4
+LORA_RANK = 8  # Increased rank for better performance
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
 GRAD_ACCUM_STEPS = 1
-BATCH_SIZE = 16
+BATCH_SIZE = 8  # Increased for A100 80GB
+MAX_SEQ_LENGTH = 4096  # Full context length
 EPOCHS = 8
-LEARNING_RATE = 5e-5
+LEARNING_RATE = 2e-5  # Optimized learning rate
 OUTPUT_DIR = "./gemma-3-4b-it-lora-finetuned"
 REPO_ID = "Sunchain/gemma-3-4b-it-dolly-alpaca-ro"
 
 # Load environment variables
-KAGGLE_USERNAME = os.environ.get("KAGGLE_USERNAME")
-KAGGLE_KEY = os.environ.get("KAGGLE_KEY")
 HF_TOKEN = os.environ.get("HF_TOKEN")
-
 assert HF_TOKEN, "Missing Hugging Face token in environment variable 'HF_TOKEN'"
-assert KAGGLE_USERNAME and KAGGLE_KEY, "Missing Kaggle credentials in environment variables"
 
-# Load tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
+# Configure tokenizer for Flash Attention
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_ID,
+    token=HF_TOKEN,
+    padding_side="right",  # Required for Flash Attention
+    truncation_side="right"
+)
 tokenizer.pad_token = tokenizer.eos_token
 
-# Optional: quantization setup
+# QLoRA Configuration (Double Quantization + NF4)
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True  # Double quantization for memory efficiency
 )
 
+# Load model with Flash Attention
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    quantization_config=bnb_config,  # Uncomment if using quantization
+    quantization_config=bnb_config,
     device_map="auto",
-    token=HF_TOKEN
+    token=HF_TOKEN,
+    attn_implementation="flash_attention_2",  # Enable Flash Attention
+    torch_dtype=torch.bfloat16
 )
-model = prepare_model_for_kbit_training(model)
 
-# LoRA config
+# Prepare model for QLoRA training
+model = prepare_model_for_kbit_training(model)
+model.config.use_cache = False  # Required for Flash Attention
+model.config.pretraining_tp = 1  # Disable tensor parallelism
+
+# LoRA Configuration (covering all linear layers)
 peft_config = LoraConfig(
     r=LORA_RANK,
-    lora_alpha=16,
-    target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
-    lora_dropout=0.05,
+    lora_alpha=LORA_ALPHA,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj"
+    ],
+    lora_dropout=LORA_DROPOUT,
     task_type="CAUSAL_LM",
     bias="none"
 )
@@ -146,31 +161,33 @@ def format_chat(example):
 dataset = dataset.map(format_chat, remove_columns=["prompt", "response"])
 
 # ---------------------------
-# Training setup
+# Training setup with Flash Attention optimizations
 # ---------------------------
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     num_train_epochs=EPOCHS,
     per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
     gradient_accumulation_steps=GRAD_ACCUM_STEPS,
     learning_rate=LEARNING_RATE,
-    weight_decay=0.01,
-    optim="adamw_torch",
+    optim="paged_adamw_8bit",  # Memory-efficient optimizer
     logging_steps=10,
-    save_strategy="steps",
-    eval_strategy="steps",
+    evaluation_strategy="steps",
     eval_steps=50,
+    save_strategy="steps",
     save_steps=50,
-    load_best_model_at_end=True,
-    metric_for_best_model="loss",
-    greater_is_better=False,
-    report_to="none",
-    bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-    fp16=not torch.cuda.is_bf16_supported(),
-    max_grad_norm=0.3,
-    lr_scheduler_type="cosine",
-    warmup_ratio=0.03,
     save_total_limit=2,
+    load_best_model_at_end=True,
+    bf16=True,  # Force BF16 for A100
+    fp16=False,  # Disable FP16 when using BF16
+    max_grad_norm=0.3,
+    warmup_ratio=0.03,
+    lr_scheduler_type="cosine",
+    report_to="none",
+    gradient_checkpointing=True,  # Enable for memory savings
+    gradient_checkpointing_kwargs={"use_reentrant": False},
+    max_steps=-1,
+    group_by_length=True,  # Improves efficiency with packing
 )
 
 trainer = SFTTrainer(
@@ -179,17 +196,20 @@ trainer = SFTTrainer(
     train_dataset=dataset["train"],
     eval_dataset=dataset["test"],
     peft_config=peft_config,
+    max_seq_length=MAX_SEQ_LENGTH,
+    tokenizer=tokenizer,
+    packing=True,  # Enable sequence packing
+    dataset_text_field="text",
     callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
 )
 
 # Train
 trainer.train()
 
-# Save final model and tokenizer
-trainer.model.save_pretrained(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
+# Save final model
+trainer.save_model(OUTPUT_DIR)
 
-# Push to Hub
+# Push to Hub (adapter only)
 trainer.model.push_to_hub(
     REPO_ID,
     use_temp_dir=False,
