@@ -115,7 +115,7 @@ alpaca_data = alpaca_df.apply(extract_prompt_response, axis=1).tolist()
 # Legal Summarization
 legal_path = "legal-summarization-ro.jsonl"
 download_file(
-    "https://lxi-data.fra1.cdn.digitaloceanspaces.com/summarize-legal-ro-18k.jsonl",
+    "https://lxi-data.fra1.digitaloceanspaces.com/summarize-legal-ro-18k.jsonl",
     legal_path
 )
 legal_data = []
