@@ -24,13 +24,12 @@ LEARNING_RATE = 5e-5
 OUTPUT_DIR = "./gemma-3-4b-it-lora-finetuned"
 REPO_ID = "Sunchain/gemma-3-4b-it-dolly-alpaca-ro"
 
-# Set environment variables - Get from system environment or .env file
-os.environ["KAGGLE_USERNAME"] = os.getenv("KAGGLE_USERNAME", "")
-os.environ["KAGGLE_KEY"] = os.getenv("KAGGLE_KEY", "")
-os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN", "")
+KAGGLE_USERNAME="sunchainltd"
+KAGGLE_KEY="76d3e448de6197733770084fe9483e70"
+HF_TOKEN="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"
 
 # Load tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=os.environ["HF_TOKEN"])
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
 tokenizer.pad_token = tokenizer.eos_token
 
 # Uncomment for quantization (requires bitsandbytes)
@@ -44,7 +43,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     # quantization_config=bnb_config,  # Uncomment if using quantization
     device_map="auto",
-    token=os.environ["HF_TOKEN"]
+    token=HF_TOKEN
 )
 model = prepare_model_for_kbit_training(model)
 
@@ -194,14 +193,14 @@ tokenizer.save_pretrained(OUTPUT_DIR)
 trainer.model.push_to_hub(
     REPO_ID,
     use_temp_dir=False,
-    token=os.environ["HF_TOKEN"],
+    token=HF_TOKEN,
     private=True
 )
 
 tokenizer.push_to_hub(
     REPO_ID,
     use_temp_dir=False,
-    token=os.environ["HF_TOKEN"]
+    token=HF_TOKEN
 )
 
 print("Model pushed to Hub!")
