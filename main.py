@@ -18,7 +18,7 @@ from trl import SFTTrainer
 MODEL_ID = "google/gemma-3-4b-it"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 LORA_RANK = 4
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 EPOCHS = 8
 LEARNING_RATE = 5e-5
 OUTPUT_DIR = "./gemma-3-4b-it-lora-finetuned"
