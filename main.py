@@ -196,7 +196,6 @@ trainer = SFTTrainer(
     train_dataset=dataset["train"],
     eval_dataset=dataset["test"],
     peft_config=peft_config,
-    tokenizer=tokenizer,
     packing=True,  # Enable sequence packing
     dataset_text_field="text",
     callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
