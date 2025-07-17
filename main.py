@@ -14,7 +14,7 @@ from transformers import (
 )
 from trl import SFTTrainer
 
-# Configuration - Update these paths/IDs as needed
+# Configuration
 MODEL_ID = "google/gemma-3-4b-it"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 LORA_RANK = 4
@@ -24,15 +24,19 @@ LEARNING_RATE = 5e-5
 OUTPUT_DIR = "./gemma-3-4b-it-lora-finetuned"
 REPO_ID = "Sunchain/gemma-3-4b-it-dolly-alpaca-ro"
 
-KAGGLE_USERNAME="sunchainltd"
-KAGGLE_KEY="76d3e448de6197733770084fe9483e70"
-HF_TOKEN="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"
+# Load environment variables
+KAGGLE_USERNAME = os.environ.get("KAGGLE_USERNAME")
+KAGGLE_KEY = os.environ.get("KAGGLE_KEY")
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+assert HF_TOKEN, "Missing Hugging Face token in environment variable 'HF_TOKEN'"
+assert KAGGLE_USERNAME and KAGGLE_KEY, "Missing Kaggle credentials in environment variables"
 
 # Load tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
 tokenizer.pad_token = tokenizer.eos_token
 
-# Uncomment for quantization (requires bitsandbytes)
+# Optional: quantization setup
 # bnb_config = BitsAndBytesConfig(
 #     load_in_4bit=True,
 #     bnb_4bit_quant_type="nf4",
@@ -47,7 +51,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 model = prepare_model_for_kbit_training(model)
 
-# Configure LoRA
+# LoRA config
 peft_config = LoraConfig(
     r=LORA_RANK,
     lora_alpha=16,
@@ -62,7 +66,6 @@ peft_config = LoraConfig(
 # ---------------------------
 
 def download_file(url, output_path):
-    """Download any file type from URL"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if not os.path.exists(output_path):
         response = requests.get(url)
@@ -122,16 +125,14 @@ with open(legal_path) as f:
             "response": example["response"]
         })
 
-# Combine all datasets
+# Combine datasets
 combined_data = dolly_data + alpaca_data + legal_data
 print(f"Total training examples: {len(combined_data)}")
 
-# ---------------------------
-# Convert to Hugging Face dataset
-# ---------------------------
+# Convert to HF dataset
 dataset = Dataset.from_list(combined_data).train_test_split(test_size=0.1)
 
-# Formatting function
+# Format for chat template
 def format_chat(example):
     messages = [
         {"role": "user", "content": example["prompt"]},
@@ -139,14 +140,10 @@ def format_chat(example):
     ]
     return {"text": tokenizer.apply_chat_template(messages, tokenize=False)}
 
-# Apply formatting
-dataset = dataset.map(
-    format_chat,
-    remove_columns=["prompt", "response"]
-)
+dataset = dataset.map(format_chat, remove_columns=["prompt", "response"])
 
 # ---------------------------
-# Training Setup
+# Training setup
 # ---------------------------
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
@@ -182,14 +179,14 @@ trainer = SFTTrainer(
     callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
 )
 
-# Start training
+# Train
 trainer.train()
 
-# Save outputs
+# Save final model and tokenizer
 trainer.model.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 
-# Push to Hub (optional)
+# Push to Hub
 trainer.model.push_to_hub(
     REPO_ID,
     use_temp_dir=False,
