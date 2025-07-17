@@ -66,7 +66,9 @@ peft_config = LoraConfig(
 # ---------------------------
 
 def download_file(url, output_path):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    dir_name = os.path.dirname(output_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
     if not os.path.exists(output_path):
         response = requests.get(url)
         response.raise_for_status()
