@@ -14,35 +14,30 @@ from transformers import (
 )
 from trl import SFTTrainer
 
-# ---------------------------
 # Configuration
-# ---------------------------
 MODEL_ID = "google/gemma-3-4b-it"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 LORA_RANK = 8
+GRAD_ACCUM_STEPS = 8 
 BATCH_SIZE = 4
-GRAD_ACCUM_STEPS = 8  # Effective batch size = 4 * 8 = 32
 EPOCHS = 8
 LEARNING_RATE = 5e-5
 OUTPUT_DIR = "./gemma-3-4b-it-lora-finetuned"
 REPO_ID = "Sunchain/gemma-3-4b-it-dolly-alpaca-ro"
 
-# ---------------------------
-# Environment Variables
-# ---------------------------
+# Load environment variables
 KAGGLE_USERNAME = os.environ.get("KAGGLE_USERNAME")
 KAGGLE_KEY = os.environ.get("KAGGLE_KEY")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 assert HF_TOKEN, "Missing Hugging Face token in environment variable 'HF_TOKEN'"
-assert KAGGLE_USERNAME and KAGGLE_KEY, "Missing Kaggle credentials"
+assert KAGGLE_USERNAME and KAGGLE_KEY, "Missing Kaggle credentials in environment variables"
 
-# ---------------------------
-# Tokenizer & Model (4-bit)
-# ---------------------------
+# Load tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
 tokenizer.pad_token = tokenizer.eos_token
 
+# Optional: quantization setup
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -51,15 +46,13 @@ bnb_config = BitsAndBytesConfig(
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    quantization_config=bnb_config,
+    quantization_config=bnb_config,  # Uncomment if using quantization
     device_map="auto",
     token=HF_TOKEN
 )
 model = prepare_model_for_kbit_training(model)
 
-# ---------------------------
-# LoRA Config
-# ---------------------------
+# LoRA config
 peft_config = LoraConfig(
     r=LORA_RANK,
     lora_alpha=16,
@@ -70,10 +63,13 @@ peft_config = LoraConfig(
 )
 
 # ---------------------------
-# Dataset Download + Prep
+# Data preparation functions
 # ---------------------------
+
 def download_file(url, output_path):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    dir_name = os.path.dirname(output_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
     if not os.path.exists(output_path):
         response = requests.get(url)
         response.raise_for_status()
@@ -87,26 +83,44 @@ def extract_prompt_response(row):
     if row.get("input"):
         prompt += " " + str(row["input"]).strip()
 
-    response = str(row.get("response") or row.get("output") or "").strip()
+    response = ""
+    if "response" in row and pd.notna(row["response"]):
+        response = str(row["response"]).strip()
+    elif "output" in row and pd.notna(row["output"]):
+        response = str(row["output"]).strip()
+
     return {"prompt": prompt, "response": response}
 
+# ---------------------------
+# Download and process datasets
+# ---------------------------
+
 # Dolly
-download_file("https://huggingface.co/api/datasets/databricks/databricks-dolly-15k/parquet/default/train/0.parquet",
-              "data/parquet/dolly/train.parquet")
-dolly_df = pd.read_parquet("data/parquet/dolly/train.parquet")
+dolly_path = "data/parquet/dolly/train.parquet"
+download_file(
+    "https://huggingface.co/api/datasets/databricks/databricks-dolly-15k/parquet/default/train/0.parquet",
+    dolly_path
+)
+dolly_df = pd.read_parquet(dolly_path)
 dolly_data = dolly_df.apply(extract_prompt_response, axis=1).tolist()
 
 # Alpaca
-download_file("https://huggingface.co/api/datasets/yahma/alpaca-cleaned/parquet/default/train/0.parquet",
-              "data/parquet/alpaca/train.parquet")
-alpaca_df = pd.read_parquet("data/parquet/alpaca/train.parquet")
+alpaca_path = "data/parquet/alpaca/train.parquet"
+download_file(
+    "https://huggingface.co/api/datasets/yahma/alpaca-cleaned/parquet/default/train/0.parquet",
+    alpaca_path
+)
+alpaca_df = pd.read_parquet(alpaca_path)
 alpaca_data = alpaca_df.apply(extract_prompt_response, axis=1).tolist()
 
-# Legal
-download_file("https://lxi-data.fra1.digitaloceanspaces.com/summarize-legal-ro-18k.jsonl",
-              "legal-summarization-ro.jsonl")
+# Legal Summarization
+legal_path = "legal-summarization-ro.jsonl"
+download_file(
+    "https://lxi-data.fra1.digitaloceanspaces.com/summarize-legal-ro-18k.jsonl",
+    legal_path
+)
 legal_data = []
-with open("legal-summarization-ro.jsonl") as f:
+with open(legal_path) as f:
     for line in f:
         example = json.loads(line)
         legal_data.append({
@@ -114,39 +128,25 @@ with open("legal-summarization-ro.jsonl") as f:
             "response": example["response"]
         })
 
-# Combine all
+# Combine datasets
 combined_data = dolly_data + alpaca_data + legal_data
 print(f"Total training examples: {len(combined_data)}")
 
-# ---------------------------
-# Chat formatting + Tokenization
-# ---------------------------
+# Convert to HF dataset
 dataset = Dataset.from_list(combined_data).train_test_split(test_size=0.1)
 
+# Format for chat template
 def format_chat(example):
     messages = [
         {"role": "user", "content": example["prompt"]},
         {"role": "assistant", "content": example["response"]}
     ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False)
-    return {"text": text}
+    return {"text": tokenizer.apply_chat_template(messages, tokenize=False)}
 
-formatted = dataset.map(format_chat, remove_columns=["prompt", "response"])
-
-def tokenize(example):
-    return tokenizer(
-        example["text"],
-        truncation=True,
-        padding="max_length",
-        max_length=MAX_LENGTH,
-        return_tensors="pt"
-    )
-
-tokenized = formatted.map(tokenize, batched=True, remove_columns=["text"])
-tokenized.set_format("torch")
+dataset = dataset.map(format_chat, remove_columns=["prompt", "response"])
 
 # ---------------------------
-# Training Arguments
+# Training setup
 # ---------------------------
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
@@ -173,27 +173,34 @@ training_args = TrainingArguments(
     save_total_limit=2,
 )
 
-# ---------------------------
-# Trainer
-# ---------------------------
 trainer = SFTTrainer(
     model=model,
     args=training_args,
-    train_dataset=tokenized["train"],
-    eval_dataset=tokenized["test"],
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
     peft_config=peft_config,
-    tokenizer=tokenizer,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
 )
 
-# ---------------------------
-# Train & Save
-# ---------------------------
+# Train
 trainer.train()
+
+# Save final model and tokenizer
 trainer.model.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 
-trainer.model.push_to_hub(REPO_ID, token=HF_TOKEN, private=True)
-tokenizer.push_to_hub(REPO_ID, token=HF_TOKEN)
+# Push to Hub
+trainer.model.push_to_hub(
+    REPO_ID,
+    use_temp_dir=False,
+    token=HF_TOKEN,
+    private=True
+)
 
-print("✅ Training complete and model pushed to Hub.")
+tokenizer.push_to_hub(
+    REPO_ID,
+    use_temp_dir=False,
+    token=HF_TOKEN
+)
+
+print("Model pushed to Hub!")
